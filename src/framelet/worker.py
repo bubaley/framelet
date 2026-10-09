@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class Command:
     path: Path | None = None
+    timestamp_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -50,7 +51,7 @@ def run_worker(connection: Connection, settings: Settings) -> None:
                         context.close()
                         connection.send(Reply())
                     else:
-                        connection.send(Reply(preview=capture(browser, command.path, settings)))
+                        connection.send(Reply(preview=capture(browser, command.path, settings, command.timestamp_ms)))
                 except PreviewError as exc:
                     connection.send(Reply(error_status=exc.status, error_code=exc.code, error_message=exc.message))
                 except BrowserTimeout:
@@ -126,7 +127,7 @@ class Renderer:
             raise PreviewError(reply.error_status, reply.error_code, reply.error_message)
         return reply
 
-    def extract(self, path: Path) -> Preview:
+    def extract(self, path: Path, timestamp_ms: int = 0) -> Preview:
         if not self._lock.acquire(blocking=False):
             raise busy_error()
         try:
@@ -135,7 +136,7 @@ class Renderer:
             if self._process is None or not self._process.is_alive():
                 self._start()
             assert self._connection is not None
-            self._connection.send(Command(path))
+            self._connection.send(Command(path, timestamp_ms))
             reply = self._read(self.settings.render_timeout_seconds)
             if reply.preview is None:
                 raise PreviewError(502, 'invalid_renderer_result', 'The renderer returned no image.')

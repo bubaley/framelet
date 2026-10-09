@@ -25,6 +25,7 @@ class FakeRenderer:
         self.started = False
         self.closed = False
         self.paths: list[Path] = []
+        self.timestamps: list[int] = []
         self.failure: PreviewError | None = None
         self.block = False
         self.entered = threading.Event()
@@ -33,9 +34,10 @@ class FakeRenderer:
     def start(self) -> None:
         self.started = True
 
-    def extract(self, path: Path) -> Preview:
+    def extract(self, path: Path, timestamp_ms: int = 0) -> Preview:
         assert path.read_bytes().startswith(MP4[:12])
         self.paths.append(path)
+        self.timestamps.append(timestamp_ms)
         self.entered.set()
         if self.block:
             assert self.release.wait(timeout=10)
@@ -89,7 +91,7 @@ def test_unauthorized_rejected_before_body(config: Settings, authorization: str)
 @pytest.mark.parametrize(
     ('filename', 'data', 'status', 'code'),
     [
-        ('sample.webm', MP4, 415, 'unsupported_video'),
+        ('sample.avi', b'RIFFinvalid', 415, 'unsupported_video'),
         ('sample.mp4', b'not-an-mp4', 415, 'unsupported_video'),
         ('sample.mp4', b'', 422, 'empty_video'),
         ('sample.mp4', MP4 + b'x' * 1024, 413, 'upload_too_large'),
@@ -199,3 +201,28 @@ def test_slow_upload_deadline(config: Settings) -> None:
     asyncio.run(app(scope, receive, send))
     assert messages[0]['status'] == 408
     assert json.loads(messages[1]['body'])['error']['code'] == 'upload_timeout'
+
+
+@pytest.mark.parametrize('timestamp', ['-1', '1.5', 'nope', str(2**53)])
+def test_invalid_timestamp(config: Settings, timestamp: str) -> None:
+    renderer = FakeRenderer()
+    with TestClient(create_app(config, renderer)) as client:
+        response = client.post(
+            '/v1/preview', headers=AUTH, files={'video': ('sample.mp4', MP4)}, data={'timestamp_ms': timestamp}
+        )
+        assert response.status_code == 422
+        assert renderer.paths == []
+
+
+def test_timestamp_passed_to_renderer(config: Settings) -> None:
+    renderer = FakeRenderer()
+    with TestClient(create_app(config, renderer)) as client:
+        for timestamp in [None, '0', '1250']:
+            response = client.post(
+                '/v1/preview',
+                headers=AUTH,
+                files={'video': ('video.bin', MP4)},
+                data={} if timestamp is None else {'timestamp_ms': timestamp},
+            )
+            assert response.status_code == 200
+        assert renderer.timestamps == [0, 0, 1250]

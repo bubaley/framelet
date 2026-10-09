@@ -1,6 +1,6 @@
 # Framelet
 
-Extract the first decoded frame of an MP4 video as PNG, using Chromium's video-to-canvas rendering pipeline.
+Extract a video frame as PNG at a selected timestamp (or the first frame by default), using Chromium's video-to-canvas rendering pipeline.
 
 Framelet is a standalone, synchronous HTTP service. It has no database or permanent storage. It does not transcode
 videos, fetch URLs, or upload files to object storage. All API handlers use normal Python `def`; rendering uses
@@ -31,7 +31,8 @@ The render page blocks network requests and only reads the supplied local video.
 
 ## Docker Compose
 
-The repository includes [compose.yaml](compose.yaml). Create `.env` with a random token and start the service:
+The repository includes [docker-compose.yaml](docker-compose.yaml) and [.env.example](.env.example) with all limits.
+Create `.env` with a random token and start the service:
 
 ```sh
 printf 'FRAMELET_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
@@ -50,13 +51,21 @@ Set `FRAMELET_PORT` to change the host port. No persistent volumes are needed.
 curl --fail-with-body http://localhost:8000/v1/preview \
   -H "Authorization: Bearer $FRAMELET_API_TOKEN" \
   -F 'video=@example.mp4;type=video/mp4' \
+  -F 'timestamp_ms=1250' \
   --output preview.png
 ```
 
 The shell variable must contain the same token as `.env`; Docker does not export it into the shell automatically.
 Success: `200 image/png`, with `X-Frame-Width` and `X-Frame-Height` headers. The PNG keeps the video's decoded
-dimensions, without resizing or color filters. Only MP4 containers with an initial `ftyp` box are accepted.
-Actual codec support depends on the pinned Chromium build; unsupported or damaged videos return `422`.
+dimensions, without resizing or color filters. Omit `timestamp_ms` (or pass `0`) for the first decoded frame.
+The parameter is a non-negative integer in milliseconds and must be less than the video duration; an out-of-range
+time returns `422 timestamp_out_of_range`. Chromium seeks while paused to the frame displayed at that time;
+millisecond input does not imply that the source video has a frame for every millisecond.
+
+Supported containers are MP4/MOV (with an initial `ftyp` box) and WebM, detected from file contents rather than
+the filename. Integration tests cover H.264 in MP4/MOV and VP9 in WebM. Actual codec support depends on the pinned
+Chromium build; unsupported codecs and damaged videos return `422`. AVI, WMV and older MOV files without `ftyp`
+are not accepted. See [Chromium media support](https://www.chromium.org/audio-video/) for codec details.
 
 | Status | Error codes | Meaning |
 | --- | --- | --- |
@@ -65,7 +74,7 @@ Actual codec support depends on the pinned Chromium build; unsupported or damage
 | 408 | `upload_timeout` | Upload deadline exceeded |
 | 413 | `upload_too_large`, `frame_too_large` | Input, pixel count, or PNG size limit exceeded |
 | 415 | `unsupported_media_type`, `unsupported_video` | Unsupported request type or container |
-| 422 | `empty_video`, `invalid_video`, `invalid_request` | Empty, undecodable, or missing video |
+| 422 | `empty_video`, `invalid_video`, `invalid_request`, `timestamp_out_of_range` | Invalid video, timestamp, or multipart fields |
 | 429 | `service_busy` | An upload or render is already in progress; `Retry-After: 1` |
 | 503 | `browser_unavailable`, `service_stopping` | Renderer unavailable |
 | 504 | `render_timeout` | Hard rendering deadline exceeded |
@@ -102,14 +111,15 @@ The renderer restarts on a subsequent request or readiness probe. Temporary file
 
 ## Color and first-frame behavior
 
-The video remains paused at its initial playback position. Framelet waits for `loadeddata`, then draws the decoded
-initial frame into a canvas and exports PNG. It does not seek to zero or start playback, avoiding both a missing
+The video remains paused. With no timestamp it stays at its initial playback position. Framelet waits for `loadeddata`, then draws the decoded
+initial frame into a canvas and exports PNG. For a positive timestamp it waits for `seeked` before exporting.
+It does not seek to zero or start playback, avoiding both a missing
 `seeked` event at time zero and accidental selection of a later frame.
 
 Playwright is pinned to **1.57.0** and installs its matching Chromium. This fixes the browser dependency, but does
 not guarantee identical colors across operating systems, browser upgrades, HDR inputs, or different downstream
 image encoders. Compare representative source videos and their final displayed previews before changing an
-existing production pipeline. The integration tests check first-frame selection using generated red/blue MP4.
+existing production pipeline. The integration tests check first-frame and timestamp selection using generated red/blue MP4, MOV and WebM.
 
 ## Development
 
@@ -127,7 +137,8 @@ FRAMELET_API_TOKEN=development-token-change-me uv run uvicorn framelet.app:creat
 
 ## Releases
 
-Stable releases are available as versioned Docker Hub images and `latest`.
+Stable releases are available as versioned Docker Hub images and `latest`. The release workflow prepares the
+version, tests and builds the image, verifies its startup, publishes it to Docker Hub, then creates the GitHub Release.
 See the [GitHub Releases](https://github.com/bubaley/framelet/releases) for release notes.
 Release automation and contributor commit conventions are documented in [docs/releasing.md](docs/releasing.md).
 

@@ -7,11 +7,11 @@ from playwright.sync_api import Browser
 from framelet.config import Settings
 from framelet.errors import PreviewError
 
-HTML = '<input id="video" type="file" accept="video/mp4">'
+HTML = '<input id="video" type="file" accept="video/*">'
 
-# Capture the initial decoded frame while playback remains paused. Seeking to zero
+# Keep playback paused. Only seek for a positive timestamp: seeking to zero
 # can omit the seeked event when the video is already at zero.
-CAPTURE = r"""({maxPixels, timeoutMs}) => new Promise((resolve) => {
+CAPTURE = r"""({maxPixels, timeoutMs, timestampMs}) => new Promise((resolve) => {
     const input = document.querySelector('#video');
     const video = document.createElement('video');
     video.preload = 'auto';
@@ -31,7 +31,7 @@ CAPTURE = r"""({maxPixels, timeoutMs}) => new Promise((resolve) => {
     };
     const timer = setTimeout(() => finish({error: 'timeout'}), timeoutMs);
     video.addEventListener('error', () => finish({error: 'invalid_video'}), {once: true});
-    video.addEventListener('loadeddata', () => {
+    const draw = () => {
         if (completed) return;
         const width = video.videoWidth;
         const height = video.videoHeight;
@@ -49,6 +49,16 @@ CAPTURE = r"""({maxPixels, timeoutMs}) => new Promise((resolve) => {
         } catch {
             finish({error: 'invalid_video'});
         }
+    };
+    video.addEventListener('loadeddata', () => {
+        if (completed) return;
+        if (timestampMs === 0) return draw();
+        const time = timestampMs / 1000;
+        if (!Number.isFinite(video.duration) || time >= video.duration) {
+            return finish({error: 'timestamp_out_of_range'});
+        }
+        video.addEventListener('seeked', draw, {once: true});
+        video.currentTime = time;
     }, {once: true});
     input.addEventListener('change', () => {
         const file = input.files[0];
@@ -68,7 +78,7 @@ class Preview:
     height: int
 
 
-def capture(browser: Browser, path: Path, settings: Settings) -> Preview:
+def capture(browser: Browser, path: Path, settings: Settings, timestamp_ms: int = 0) -> Preview:
     context = browser.new_context(service_workers='block', accept_downloads=False)
     try:
         context.route('**/*', lambda route: route.abort())
@@ -79,7 +89,11 @@ def capture(browser: Browser, path: Path, settings: Settings) -> Preview:
         # so keep it on the page and await it after set_input_files().
         page.evaluate(
             f'(options) => {{ window.captureResult = ({CAPTURE})(options); }}',
-            {'maxPixels': settings.max_frame_pixels, 'timeoutMs': settings.render_timeout_seconds * 1000},
+            {
+                'maxPixels': settings.max_frame_pixels,
+                'timeoutMs': settings.render_timeout_seconds * 1000,
+                'timestampMs': timestamp_ms,
+            },
         )
         page.locator('#video').set_input_files(path)
         result: object = page.evaluate('window.captureResult')
@@ -88,6 +102,8 @@ def capture(browser: Browser, path: Path, settings: Settings) -> Preview:
         error = result.get('error')
         if error == 'timeout':
             raise PreviewError(504, 'render_timeout', 'Video decoding timed out.')
+        if error == 'timestamp_out_of_range':
+            raise PreviewError(422, 'timestamp_out_of_range', 'The timestamp must be less than the video duration.')
         if error == 'frame_too_large':
             raise PreviewError(413, 'frame_too_large', 'The video frame exceeds the pixel limit.')
         if error:

@@ -60,3 +60,41 @@ def test_pixel_limit_and_browser_crash_recovery() -> None:
         assert renderer.ready()
     finally:
         renderer.close()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('extension', ['mp4', 'mov', 'webm'])
+def test_timestamp_and_container_support(extension: str, tmp_path: Path) -> None:
+    video_path = VIDEO.with_suffix(f'.{extension}')
+    settings = Settings(api_token=SecretStr(TOKEN), temp_directory=str(tmp_path))
+    with TestClient(create_app(settings)) as client:
+        for timestamp, color in [
+            (None, (253, 0, 0)),
+            (0, (253, 0, 0)),
+            (1, (253, 0, 0)),
+            (750, (0, 0, 254)),
+            (999, (0, 0, 254)),
+        ]:
+            with video_path.open('rb') as video:
+                response = client.post(
+                    '/v1/preview',
+                    headers={'Authorization': f'Bearer {TOKEN}'},
+                    files={'video': ('upload.bin', video)},
+                    data={} if timestamp is None else {'timestamp_ms': str(timestamp)},
+                )
+            assert response.status_code == 200, response.text
+            image = Image.open(BytesIO(response.content)).convert('RGB')
+            assert image.getpixel((64, 48)) == pytest.approx(color, abs=6)
+            assert not list(tmp_path.iterdir())
+        for timestamp in [1000, 1001]:
+            with video_path.open('rb') as video:
+                response = client.post(
+                    '/v1/preview',
+                    headers={'Authorization': f'Bearer {TOKEN}'},
+                    files={'video': ('upload.bin', video)},
+                    data={'timestamp_ms': str(timestamp)},
+                )
+            assert response.status_code == 422, response.text
+            assert response.json()['error']['code'] == 'timestamp_out_of_range'
+            assert not list(tmp_path.iterdir())
+        assert client.get('/health/ready').status_code == 200

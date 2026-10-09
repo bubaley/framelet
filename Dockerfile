@@ -1,5 +1,5 @@
 FROM ghcr.io/astral-sh/uv:0.9.2@sha256:6dbd7c42a9088083fa79e41431a579196a189bcee3ae68ba904ac2bf77765867 AS uv
-FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS base
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS export
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -10,10 +10,25 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY --from=uv /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-install-project
+RUN uv export --locked --no-dev --no-emit-project --format requirements-txt \
+    --no-header --no-annotate --output-file requirements.txt > /dev/null
+
+FROM python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS base
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    PATH="/app/.venv/bin:$PATH"
+COPY --from=uv /uv /usr/local/bin/uv
+WORKDIR /app
+COPY --from=export /app/requirements.txt ./requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv uv venv \
+    && uv pip install --require-hashes -r requirements.txt
 RUN .venv/bin/python -m playwright install --with-deps --only-shell chromium \
     && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/* /root/.cache
+COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY README.md LICENSE ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-editable \
@@ -21,7 +36,7 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-edi
     && useradd --uid 10001 --gid framelet --create-home framelet
 
 FROM base AS test
-RUN uv sync --locked
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked
 COPY tests ./tests
 COPY scripts ./scripts
 RUN ruff check . && ruff format --check . && mypy src tests scripts && pytest

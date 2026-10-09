@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Existing release tag to republish (leave empty for normal main releases)'
+        description: 'Existing release tag to republish (empty for normal main releases)'
         required: false
         default: ''
         type: string
@@ -24,7 +24,7 @@ concurrency:
 jobs:
   checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,75 +37,28 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy src tests scripts
-      - run: uv run playwright install --with-deps --only-shell chromium
-      - run: uv run pytest
-      - name: Verify release version
-        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-        run: uv run python scripts/verify_release.py
 
   docker:
     needs: checks
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    concurrency:
+      group: framelet-docker-release
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_tag || github.sha }}
-      - uses: docker/setup-buildx-action@v3
-      - name: Test in Linux container
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: test
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Build runtime image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: runtime
-          load: true
-          tags: framelet:ci
-          cache-from: type=gha
-      - name: Smoke test runtime image
-        run: |
-          docker run -d --name framelet-ci \
-            -p 127.0.0.1:8000:8000 --shm-size 256m --memory 1g --cpus 2 \
-            --read-only --tmpfs /tmp:rw,nosuid,size=256m \
-            --cap-drop ALL --security-opt no-new-privileges \
-            -e FRAMELET_API_TOKEN=ci-only-token-not-for-production framelet:ci
-          python scripts/smoke.py
-      - name: Container logs
-        if: always()
-        run: docker logs framelet-ci || true
-      - name: Stop container
-        if: always()
-        run: docker rm -f framelet-ci || true
-
-  release:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && inputs.release_tag == ''
-    needs: docker
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    concurrency:
-      group: framelet-release
-      cancel-in-progress: false
-    outputs:
-      released: ${{ steps.version.outputs.released }}
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
           fetch-depth: 0
-      - name: Verify tested commit is still current
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.2'
+          enable-cache: true
+      - name: Verify main is current
         id: head
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && inputs.release_tag == ''
         run: |
           git fetch origin main
           if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
@@ -115,66 +68,102 @@ jobs:
             echo 'current=false' >> "$GITHUB_OUTPUT"
             echo 'A newer main commit will be released by its own workflow.'
           fi
-      - uses: astral-sh/setup-uv@v6
-        if: steps.head.outputs.current == 'true'
-        with:
-          version: '0.9.2'
-          enable-cache: true
-      - name: Prepare release environment
-        if: steps.head.outputs.current == 'true'
-        run: |
-          uv sync --locked --python 3.13
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-      - name: Create version, changelog, tag and GitHub Release
-        if: steps.head.outputs.current == 'true'
+      - name: Prepare version and changelog locally
         id: version
+        if: steps.head.outputs.current == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: uvx --from python-semantic-release==10.7.0 semantic-release version
-
-  publish:
-    if: >-
-      always() && needs.docker.result == 'success' &&
-      (needs.release.outputs.released == 'true' || startsWith(github.ref, 'refs/tags/') ||
-      (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
-    needs: [docker, release]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release.outputs.tag || inputs.release_tag || github.ref }}
-      - name: Verify versioned checkout
-        id: version
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          uvx --from python-semantic-release==10.7.0 semantic-release version --no-push --no-vcs-release
+      - name: Resolve publishing version
+        id: image
+        if: steps.version.outputs.released == 'true' || startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         env:
-          RELEASE_TAG: ${{ needs.release.outputs.tag || inputs.release_tag || github.ref_name }}
-        run: python scripts/verify_release.py
+          RELEASE_TAG: ${{ steps.version.outputs.tag || inputs.release_tag || github.ref_name }}
+        run: |
+          python scripts/verify_release.py
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@v3
+      - name: Test in Linux container
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          platforms: linux/amd64
+          push: false
+          cache-from: |
+            type=gha,scope=framelet-test-amd64
+            type=gha,scope=framelet-runtime-amd64
+          cache-to: type=gha,scope=framelet-test-amd64,mode=max,ignore-error=true
       - name: Log in to Docker Hub
+        if: steps.image.outputs.version != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME || github.repository_owner }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
-      - name: Image tags
+      - name: Image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ vars.DOCKERHUB_IMAGE || format('{0}/framelet', github.repository_owner) }}
           tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=latest
+            type=raw,value=${{ steps.image.outputs.version }},enable=${{ steps.image.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ steps.image.outputs.version != '' }}
           flavor: latest=false
           labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
-      - name: Publish to Docker Hub
+            org.opencontainers.image.version=${{ steps.image.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.image.outputs.revision || github.sha }}
+      - name: Build runtime image once
         uses: docker/build-push-action@v6
         with:
           context: .
           target: runtime
-          push: true
           platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          tags: |
+            framelet:ci
+            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: |
+            type=gha,scope=framelet-test-amd64
+            type=gha,scope=framelet-runtime-amd64
+          cache-to: type=gha,scope=framelet-runtime-amd64,mode=max,ignore-error=true
+      - name: Verify runtime container
+        run: |
+          docker run -d --name framelet-ci \
+            -p 127.0.0.1:8000:8000 --shm-size 256m --memory 1g --cpus 2 --pids-limit 256 \
+            --read-only --tmpfs /tmp:rw,nosuid,size=256m \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -e FRAMELET_API_TOKEN=ci-only-token-not-for-production framelet:ci
+          python scripts/smoke.py
+      - name: Push version commit and tag
+        if: steps.version.outputs.released == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.image.outputs.tag }}
+        run: git push --atomic origin HEAD:main "refs/tags/$RELEASE_TAG"
+      - name: Publish the verified image to Docker Hub
+        if: steps.image.outputs.version != ''
+        env:
+          IMAGE: ${{ vars.DOCKERHUB_IMAGE || format('{0}/framelet', github.repository_owner) }}
+          VERSION: ${{ steps.image.outputs.version }}
+        run: |
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:latest"
+      - name: Create GitHub Release after Docker publication
+        if: steps.image.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.image.outputs.tag }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --title "$RELEASE_TAG" --generate-notes
+          fi
+          uvx --from python-semantic-release==10.7.0 semantic-release changelog --post-to-release-tag "$RELEASE_TAG"
+      - name: Container logs
+        if: always()
+        run: docker logs framelet-ci || true
+      - name: Stop test container
+        if: always()
+        run: docker rm -f framelet-ci || true
