@@ -26,8 +26,11 @@ COPY --from=export /app/requirements.txt ./requirements.txt
 RUN --mount=type=cache,target=/root/.cache/uv uv venv \
     && uv pip install --require-hashes -r requirements.txt
 RUN .venv/bin/python -m playwright install --with-deps --only-shell chromium \
-    && apt-get install -y --no-install-recommends tini ffmpeg \
+    && apt-get install -y --no-install-recommends tini \
     && rm -rf /var/lib/apt/lists/* /root/.cache
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock ./
 COPY src ./src
 COPY README.md LICENSE ./

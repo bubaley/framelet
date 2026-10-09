@@ -16,6 +16,7 @@ and Chromium layers; version-only and application-code changes do not invalidate
 changes when locked runtime dependencies, the Dockerfile, or pinned base images change. uv also uses a local
 BuildKit cache mount, and `setup-uv` caches host tooling. Cache mounts are a local speedup; cross-run reuse relies
 on exported layer caches, not on cache-mount persistence. Cold builds still work without any cache.
+FFmpeg is installed in a separate layer after Chromium, so codec-tool changes can reuse the browser layer.
 Runtime testing and publishing reuse the same locally loaded image; publication does not trigger a second build.
 
 ## Commit conventions
