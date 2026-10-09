@@ -13,7 +13,7 @@ Create a local `.env` file with a random token (at least 16 characters):
 
 ```sh
 printf 'FRAMELET_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
-docker build -t framelet:local .
+docker build --platform linux/amd64 -t framelet:local .
 docker run --rm --name framelet \
   --env-file .env -p 127.0.0.1:8000:8000 \
   --memory 1g --cpus 2 --shm-size 256m \
@@ -23,10 +23,26 @@ docker run --rm --name framelet \
 ```
 
 Published images use `bubaley/framelet:<version>` on Docker Hub. No images are published to GHCR.
+The supported container platform is Linux amd64; native ARM Chromium lacks the required H.264 codec in this build.
 The process runs as a non-root user, with Tini to reap terminated browser children.
 Chromium's own sandbox is disabled by Playwright's default launch mode;
 run the service in an isolated container with the limits above, on a private network or behind an authenticated proxy.
 The render page blocks network requests and only reads the supplied local video.
+
+## Docker Compose
+
+The repository includes [compose.yaml](compose.yaml). Create `.env` with a random token and start the service:
+
+```sh
+printf 'FRAMELET_API_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+docker compose pull
+docker compose up -d
+curl --fail http://127.0.0.1:8000/health/ready
+```
+
+Set `FRAMELET_IMAGE_TAG` in `.env` to a release version to pin deployments. The default is `latest`.
+`FRAMELET_BIND_ADDRESS` defaults to `127.0.0.1`; containers on the same Docker network can use `http://framelet:8000`.
+Set `FRAMELET_PORT` to change the host port. No persistent volumes are needed.
 
 ## API
 
@@ -46,6 +62,7 @@ Actual codec support depends on the pinned Chromium build; unsupported or damage
 | --- | --- | --- |
 | 400 | `invalid_content_length`, `invalid_request` | Malformed request or multipart body |
 | 401 | `unauthorized` | Missing or incorrect bearer token |
+| 408 | `upload_timeout` | Upload deadline exceeded |
 | 413 | `upload_too_large`, `frame_too_large` | Input, pixel count, or PNG size limit exceeded |
 | 415 | `unsupported_media_type`, `unsupported_video` | Unsupported request type or container |
 | 422 | `empty_video`, `invalid_video`, `invalid_request` | Empty, undecodable, or missing video |
@@ -68,6 +85,7 @@ Errors have the form `{"error":{"code":"invalid_video","message":"..."}}`.
 | `FRAMELET_MAX_VIDEO_BYTES` | `20971520` | 20 MiB input limit |
 | `FRAMELET_MAX_FRAME_PIXELS` | `16777216` | Decoded width × height limit |
 | `FRAMELET_MAX_FRAME_BYTES` | `67108864` | PNG output limit |
+| `FRAMELET_UPLOAD_TIMEOUT_SECONDS` | `30` | Deadline for receiving the complete multipart body |
 | `FRAMELET_RENDER_TIMEOUT_SECONDS` | `15` | Hard deadline for a render, including page cleanup |
 | `FRAMELET_STARTUP_TIMEOUT_SECONDS` | `30` | Browser startup/restart deadline |
 | `FRAMELET_TEMP_DIRECTORY` | system temporary directory | Per-request temporary files |
@@ -75,8 +93,8 @@ Errors have the form `{"error":{"code":"invalid_video","message":"..."}}`.
 The total multipart body limit is the video limit plus 64 KiB of encoding overhead. It is enforced even when
 `Content-Length` is missing or inaccurate. Authentication and admission control run before multipart parsing.
 At most one upload/render is accepted per HTTP process; excess requests fail immediately. Scale with containers,
-not Uvicorn workers, so memory usage and admission limits remain predictable. Configure upload/connection timeouts
-and request-rate limits at your reverse proxy for clients that send bodies slowly.
+not Uvicorn workers, so memory usage and admission limits remain predictable. Slow uploads are stopped after the
+upload deadline. Configure connection timeouts and request-rate limits at your reverse proxy as well.
 
 One spawned worker owns Playwright and Chromium for its lifetime. Each render creates a fresh browser context.
 The HTTP process enforces the deadline and kills the entire worker process group on timeout or renderer failure.
@@ -107,24 +125,10 @@ uv run pytest
 FRAMELET_API_TOKEN=development-token-change-me uv run uvicorn framelet.app:create_app --factory --host 127.0.0.1
 ```
 
-## GitHub Actions and Docker Hub
+## Releases
 
-Pull requests and pushes to `main` run lint, type checking, unit/browser tests, and build/test the Docker image.
-Release tags (`v0.1.0`) and manual workflow runs publish to Docker Hub after the checks pass.
-
-Add these repository secrets under **Settings → Secrets and variables → Actions**:
-
-- `DOCKERHUB_USERNAME`: optional, defaults to `bubaley`
-- `DOCKERHUB_PASSWORD`: a Docker Hub access token with permission to push `bubaley/framelet`.
-
-The repository variable `DOCKERHUB_IMAGE` can override the default image name `bubaley/framelet`.
-The Docker Hub repository should be public. Version tags must match `project.version` in `pyproject.toml`.
-Stable releases publish the full version and `latest`; a manual run publishes `edge` and the commit SHA.
-Container tests run on Linux amd64; other architectures are not published until tested.
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
+Stable releases are available as versioned Docker Hub images and `latest`.
+See the [GitHub Releases](https://github.com/bubaley/framelet/releases) for release notes.
+Release automation and contributor commit conventions are documented in [docs/releasing.md](docs/releasing.md).
 
 MIT licensed. See [LICENSE](LICENSE).

@@ -1,6 +1,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.metadata import version
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated, Protocol
@@ -66,7 +67,7 @@ def create_app(settings: Settings | None = None, renderer: PreviewRenderer | Non
         finally:
             service.close()
 
-    app = FastAPI(title='Framelet', version='0.1.0', lifespan=lifespan)
+    app = FastAPI(title='Framelet', version=version('framelet'), lifespan=lifespan)
     app.add_middleware(UploadGuard, settings=config)
 
     @app.exception_handler(PreviewError)
@@ -75,6 +76,8 @@ def create_app(settings: Settings | None = None, renderer: PreviewRenderer | Non
 
     @app.exception_handler(HTTPException)
     def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:
+        if getattr(request.state, 'upload_timeout', False):
+            return error_response(408, 'upload_timeout', 'Uploading exceeded the time limit.')
         if getattr(request.state, 'upload_too_large', False):
             return error_response(413, 'upload_too_large', 'The upload exceeds the size limit.')
         return error_response(exc.status_code, 'invalid_request', str(exc.detail))

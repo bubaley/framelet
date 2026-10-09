@@ -1,5 +1,7 @@
+import asyncio
 import secrets
 import threading
+import time
 
 from starlette.datastructures import Headers
 from starlette.formparsers import MultiPartException
@@ -45,10 +47,18 @@ class UploadGuard:
             await self._error(scope, receive, send, 429, 'service_busy', 'Another upload is being processed.')
             return
         received = 0
+        deadline = time.monotonic() + self.settings.upload_timeout_seconds
 
         async def bounded_receive() -> Message:
             nonlocal received
-            message = await receive()
+            remaining = deadline - time.monotonic()
+            try:
+                if remaining <= 0:
+                    raise TimeoutError
+                message = await asyncio.wait_for(receive(), timeout=remaining)
+            except TimeoutError as exc:
+                scope.setdefault('state', {})['upload_timeout'] = True
+                raise MultiPartException('Uploading exceeded the time limit.') from exc
             if message['type'] == 'http.request':
                 received += len(message.get('body', b''))
                 if received > self.settings.max_request_bytes:

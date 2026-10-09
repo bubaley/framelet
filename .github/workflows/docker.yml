@@ -1,4 +1,4 @@
-name: Check and publish Docker image
+name: CI and releases
 
 on:
   push:
@@ -7,13 +7,19 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to republish (leave empty for normal main releases)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
   group: framelet-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  cancel-in-progress: false
 
 jobs:
   checks:
@@ -21,6 +27,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.sha }}
       - uses: astral-sh/setup-uv@v6
         with:
           version: '0.9.2'
@@ -32,21 +40,10 @@ jobs:
       - run: uv run playwright install --with-deps --only-shell chromium
       - run: uv run pytest
       - name: Verify release version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          uv run python - <<'PY'
-          import os
-          import re
-          import tomllib
-          from pathlib import Path
-
-          tag = os.environ['RELEASE_TAG']
-          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
-          if not re.fullmatch(r'v\d+\.\d+\.\d+', tag) or tag != f'v{version}':
-              raise SystemExit('Release tag must match the stable project version')
-          PY
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: uv run python scripts/verify_release.py
 
   docker:
     needs: checks
@@ -54,6 +51,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.sha }}
       - uses: docker/setup-buildx-action@v3
       - name: Test in Linux container
         uses: docker/build-push-action@v6
@@ -86,30 +85,88 @@ jobs:
         if: always()
         run: docker rm -f framelet-ci || true
 
-  publish:
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+  release:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && inputs.release_tag == ''
     needs: docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: framelet-release
+      cancel-in-progress: false
+    outputs:
+      released: ${{ steps.version.outputs.released }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Verify tested commit is still current
+        id: head
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            git checkout -B main
+            echo 'current=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'current=false' >> "$GITHUB_OUTPUT"
+            echo 'A newer main commit will be released by its own workflow.'
+          fi
+      - uses: astral-sh/setup-uv@v6
+        if: steps.head.outputs.current == 'true'
+        with:
+          version: '0.9.2'
+          enable-cache: true
+      - name: Prepare release environment
+        if: steps.head.outputs.current == 'true'
+        run: |
+          uv sync --locked --python 3.13
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+      - name: Create version, changelog, tag and GitHub Release
+        if: steps.head.outputs.current == 'true'
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uvx --from python-semantic-release==10.7.0 semantic-release version
+
+  publish:
+    if: >-
+      always() && needs.docker.result == 'success' &&
+      (needs.release.outputs.released == 'true' || startsWith(github.ref, 'refs/tags/') ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
+    needs: [docker, release]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.tag || inputs.release_tag || github.ref }}
+      - name: Verify versioned checkout
+        id: version
+        env:
+          RELEASE_TAG: ${{ needs.release.outputs.tag || inputs.release_tag || github.ref_name }}
+        run: python scripts/verify_release.py
       - uses: docker/setup-buildx-action@v3
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME || 'bubaley' }}
+          username: ${{ secrets.DOCKERHUB_USERNAME || github.repository_owner }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
       - name: Image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ vars.DOCKERHUB_IMAGE || 'bubaley/framelet' }}
+          images: ${{ vars.DOCKERHUB_IMAGE || format('{0}/framelet', github.repository_owner) }}
           tags: |
-            type=semver,pattern={{version}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
-            type=sha
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=latest
           flavor: latest=false
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
       - name: Publish to Docker Hub
         uses: docker/build-push-action@v6
         with:

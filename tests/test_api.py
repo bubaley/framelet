@@ -1,3 +1,5 @@
+import asyncio
+import json
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -6,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from starlette.types import Message, Scope
 
 from framelet.app import create_app
 from framelet.browser import Preview
@@ -155,3 +158,44 @@ def test_large_declared_body_and_missing_field(config: Settings) -> None:
         assert response.status_code == 422
         response = client.post('/v1/preview', headers=AUTH, content=MP4)
         assert response.status_code == 415
+
+
+def test_slow_upload_deadline(config: Settings) -> None:
+    config.upload_timeout_seconds = 0.1
+    app = create_app(config, FakeRenderer())
+    messages: list[Message] = []
+    calls = 0
+
+    async def receive() -> Message:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                'type': 'http.request',
+                'body': b'--test\r\nContent-Disposition: form-data; name="video"; filename="sample.mp4"\r\n\r\n' + MP4,
+                'more_body': True,
+            }
+        await asyncio.sleep(10)
+        return {'type': 'http.request', 'body': b'\r\n--test--\r\n', 'more_body': False}
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    scope: Scope = {
+        'type': 'http',
+        'method': 'POST',
+        'path': '/v1/preview',
+        'root_path': '',
+        'query_string': b'',
+        'http_version': '1.1',
+        'scheme': 'http',
+        'server': ('testserver', 80),
+        'client': ('127.0.0.1', 12345),
+        'headers': [
+            (b'authorization', f'Bearer {TOKEN}'.encode()),
+            (b'content-type', b'multipart/form-data; boundary=test'),
+        ],
+    }
+    asyncio.run(app(scope, receive, send))
+    assert messages[0]['status'] == 408
+    assert json.loads(messages[1]['body'])['error']['code'] == 'upload_timeout'
