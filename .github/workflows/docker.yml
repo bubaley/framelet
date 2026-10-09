@@ -74,6 +74,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          uv sync --locked --python 3.13
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           uvx --from python-semantic-release==10.7.0 semantic-release version --no-push --no-vcs-release
@@ -85,6 +86,12 @@ jobs:
         run: |
           python scripts/verify_release.py
           echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          latest_tag=$(git tag --list 'v*' --sort=-version:refname | head -n 1)
+          if [ "$RELEASE_TAG" = "$latest_tag" ]; then
+            echo 'latest=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'latest=false' >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/setup-buildx-action@v3
       - name: Test in Linux container
         uses: docker/build-push-action@v6
@@ -110,7 +117,7 @@ jobs:
           images: ${{ vars.DOCKERHUB_IMAGE || format('{0}/framelet', github.repository_owner) }}
           tags: |
             type=raw,value=${{ steps.image.outputs.version }},enable=${{ steps.image.outputs.version != '' }}
-            type=raw,value=latest,enable=${{ steps.image.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ steps.image.outputs.latest == 'true' }}
           flavor: latest=false
           labels: |
             org.opencontainers.image.version=${{ steps.image.outputs.version }}
@@ -148,9 +155,12 @@ jobs:
         env:
           IMAGE: ${{ vars.DOCKERHUB_IMAGE || format('{0}/framelet', github.repository_owner) }}
           VERSION: ${{ steps.image.outputs.version }}
+          PROMOTE_LATEST: ${{ steps.image.outputs.latest }}
         run: |
           docker push "$IMAGE:$VERSION"
-          docker push "$IMAGE:latest"
+          if [ "$PROMOTE_LATEST" = 'true' ]; then
+            docker push "$IMAGE:latest"
+          fi
       - name: Create GitHub Release after Docker publication
         if: steps.image.outputs.version != ''
         env:

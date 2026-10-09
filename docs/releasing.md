@@ -44,7 +44,7 @@ labels. Only tested Linux amd64 images are published. No images are published to
 To retry publishing an existing release, run **CI and releases** manually and set `release_tag` to the existing tag
 (for example, `v0.1.0`). The workflow checks out and tests that exact tag, verifies that the tag matches the package
 version, and publishes its image, then creates or refreshes the matching GitHub Release without bumping the version. A manual run with no tag retries the normal
-`main` release path. Do not change an existing release tag to point to a different commit.
+`main` release path. Retrying an older tag does not overwrite `latest`. Do not change an existing release tag to point to a different commit.
 
 References: [Python Semantic Release](https://python-semantic-release.readthedocs.io/en/stable/configuration/automatic-releases/github-actions.html),
 [uv lock synchronization](https://python-semantic-release.readthedocs.io/en/stable/configuration/configuration-guides/uv_integration.html).
