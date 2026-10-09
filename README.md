@@ -111,8 +111,8 @@ The renderer restarts on a subsequent request or readiness probe. Temporary file
 
 ## Color and first-frame behavior
 
-The video remains paused. With no timestamp it stays at its initial playback position. Framelet waits for `loadeddata`, then draws the decoded
-initial frame into a canvas and exports PNG. For a positive timestamp it waits for `seeked` before exporting.
+The video remains paused. With no timestamp it stays at its initial playback position. Framelet waits for `loadeddata` and `requestVideoFrameCallback`, then draws the presented
+initial frame into a canvas and exports PNG. For a positive timestamp it waits for both `seeked` and frame presentation before exporting.
 It does not seek to zero or start playback, avoiding both a missing
 `seeked` event at time zero and accidental selection of a later frame.
 

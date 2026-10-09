@@ -17,6 +17,7 @@ CAPTURE = r"""({maxPixels, timeoutMs, timestampMs}) => new Promise((resolve) => 
     video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
+    document.body.appendChild(video);
     let url;
     let completed = false;
     const finish = (result) => {
@@ -50,15 +51,37 @@ CAPTURE = r"""({maxPixels, timeoutMs, timestampMs}) => new Promise((resolve) => 
             finish({error: 'invalid_video'});
         }
     };
-    video.addEventListener('loadeddata', () => {
-        if (completed) return;
+    let loaded = false;
+    let presented = false;
+    const initialReady = () => {
+        if (completed || !loaded || !presented) return;
         if (timestampMs === 0) return draw();
         const time = timestampMs / 1000;
         if (!Number.isFinite(video.duration) || time >= video.duration) {
             return finish({error: 'timestamp_out_of_range'});
         }
-        video.addEventListener('seeked', draw, {once: true});
+        let seeked = false;
+        let seekPresented = false;
+        const seekReady = () => {
+            if (seeked && seekPresented) draw();
+        };
+        video.requestVideoFrameCallback(() => {
+            seekPresented = true;
+            seekReady();
+        });
+        video.addEventListener('seeked', () => {
+            seeked = true;
+            seekReady();
+        }, {once: true});
         video.currentTime = time;
+    };
+    video.requestVideoFrameCallback(() => {
+        presented = true;
+        initialReady();
+    });
+    video.addEventListener('loadeddata', () => {
+        loaded = true;
+        initialReady();
     }, {once: true});
     input.addEventListener('change', () => {
         const file = input.files[0];

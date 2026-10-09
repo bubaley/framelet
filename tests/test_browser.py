@@ -84,7 +84,7 @@ def test_timestamp_and_container_support(extension: str, tmp_path: Path) -> None
                 )
             assert response.status_code == 200, response.text
             image = Image.open(BytesIO(response.content)).convert('RGB')
-            assert image.getpixel((64, 48)) == pytest.approx(color, abs=6)
+            assert image.getpixel((64, 48)) == pytest.approx(color, abs=6), (extension, timestamp)
             assert not list(tmp_path.iterdir())
         for timestamp in [1000, 1001]:
             with video_path.open('rb') as video:
