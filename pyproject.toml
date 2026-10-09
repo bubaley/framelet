@@ -56,7 +56,7 @@ commit_author = "github-actions[bot] <41898282+github-actions[bot]@users.noreply
 allow_zero_version = true
 major_on_zero = false
 assets = ["uv.lock"]
-build_command = "uv lock --offline && git add uv.lock"
+build_command = "uv lock && git add uv.lock"
 
 [tool.semantic_release.branches.main]
 match = "main"
