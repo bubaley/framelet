@@ -2,8 +2,8 @@
 
 Extract a video frame as PNG at a selected timestamp (or the first frame by default), using Chromium's video-to-canvas rendering pipeline.
 
-Framelet is a standalone, synchronous HTTP service. It has no database or permanent storage. It does not transcode
-videos, fetch URLs, or upload files to object storage. All API handlers use normal Python `def`; rendering uses
+Framelet is a standalone, synchronous HTTP service. It has no database or permanent storage. It does not fetch URLs or upload files to object storage. For HEVC only, it prepares a bounded, temporary
+lossless VP9 WebM before browser rendering. All API handlers use normal Python `def`; rendering uses
 Playwright's synchronous API in a dedicated process. The small ASGI middleware/lifespan layer is asynchronous as
 required by FastAPI, but clients receive the PNG in the original HTTP response, without jobs, polling, or callbacks.
 
@@ -62,8 +62,14 @@ The parameter is a non-negative integer in milliseconds and must be less than th
 time returns `422 timestamp_out_of_range`. Chromium seeks while paused to the frame displayed at that time;
 millisecond input does not imply that the source video has a frame for every millisecond.
 
+HEVC/H.265 in MP4/MOV is supported for 8-bit and 10-bit YUV 4:2:0, without a GPU. FFprobe reads codec
+and color metadata; FFmpeg prepares lossless VP9 with the same pixel format and color tags. Chromium still
+performs YUV-to-RGB conversion and canvas PNG export. First-frame requests prepare only one frame; timestamp
+requests prepare a prefix through the selected time, retaining source frame timing. Original uploads are unchanged.
+Other codecs continue directly to Chromium.
+
 Supported containers are MP4/MOV (with an initial `ftyp` box) and WebM, detected from file contents rather than
-the filename. Integration tests cover H.264 in MP4/MOV and VP9 in WebM. Actual codec support depends on the pinned
+the filename. Integration tests cover H.264 in MP4/MOV, VP9 in WebM, and 8/10-bit HEVC. Actual codec support depends on the pinned
 Chromium build; unsupported codecs and damaged videos return `422`. AVI, WMV and older MOV files without `ftyp`
 are not accepted. See [Chromium media support](https://www.chromium.org/audio-video/) for codec details.
 
@@ -74,9 +80,9 @@ are not accepted. See [Chromium media support](https://www.chromium.org/audio-vi
 | 408 | `upload_timeout` | Upload deadline exceeded |
 | 413 | `upload_too_large`, `frame_too_large` | Input, pixel count, or PNG size limit exceeded |
 | 415 | `unsupported_media_type`, `unsupported_video` | Unsupported request type or container |
-| 422 | `empty_video`, `invalid_video`, `invalid_request`, `timestamp_out_of_range` | Invalid video, timestamp, or multipart fields |
+| 422 | `empty_video`, `invalid_video`, `invalid_request`, `unsupported_video`, `timestamp_out_of_range` | Invalid video, timestamp, or multipart fields |
 | 429 | `service_busy` | An upload or render is already in progress; `Retry-After: 1` |
-| 503 | `browser_unavailable`, `service_stopping` | Renderer unavailable |
+| 503 | `browser_unavailable`, `decoder_unavailable`, `service_stopping` | Renderer unavailable |
 | 504 | `render_timeout` | Hard rendering deadline exceeded |
 | 500/502 | `internal_error`, `render_failed`, `invalid_renderer_result` | Unexpected internal failure |
 
@@ -94,8 +100,9 @@ Errors have the form `{"error":{"code":"invalid_video","message":"..."}}`.
 | `FRAMELET_MAX_VIDEO_BYTES` | `20971520` | 20 MiB input limit |
 | `FRAMELET_MAX_FRAME_PIXELS` | `16777216` | Decoded width × height limit |
 | `FRAMELET_MAX_FRAME_BYTES` | `67108864` | PNG output limit |
+| `FRAMELET_MAX_INTERMEDIATE_BYTES` | `67108864` | HEVC preparation file limit (64 MiB) |
 | `FRAMELET_UPLOAD_TIMEOUT_SECONDS` | `30` | Deadline for receiving the complete multipart body |
-| `FRAMELET_RENDER_TIMEOUT_SECONDS` | `15` | Hard deadline for a render, including page cleanup |
+| `FRAMELET_RENDER_TIMEOUT_SECONDS` | `15` | Hard deadline including codec probing, HEVC preparation and page cleanup |
 | `FRAMELET_STARTUP_TIMEOUT_SECONDS` | `30` | Browser startup/restart deadline |
 | `FRAMELET_TEMP_DIRECTORY` | system temporary directory | Per-request temporary files |
 
@@ -106,7 +113,7 @@ not Uvicorn workers, so memory usage and admission limits remain predictable. Sl
 upload deadline. Configure connection timeouts and request-rate limits at your reverse proxy as well.
 
 One spawned worker owns Playwright and Chromium for its lifetime. Each render creates a fresh browser context.
-The HTTP process enforces the deadline and kills the entire worker process group on timeout or renderer failure.
+The HTTP process enforces the deadline and kills the entire worker process group on timeout or renderer failure, including FFmpeg/FFprobe children.
 The renderer restarts on a subsequent request or readiness probe. Temporary files are cleaned up on success and failure.
 
 ## Color and first-frame behavior
@@ -118,12 +125,13 @@ It does not seek to zero or start playback, avoiding both a missing
 
 Playwright is pinned to **1.57.0** and installs its matching Chromium. This fixes the browser dependency, but does
 not guarantee identical colors across operating systems, browser upgrades, HDR inputs, or different downstream
-image encoders. Compare representative source videos and their final displayed previews before changing an
+image encoders. HEVC preparation preserves decoded YUV samples and stream color tags; it does not apply
+color filters or convert pixels to RGB. Dynamic HDR metadata is not guaranteed to survive preparation. Compare representative source videos and their final displayed previews before changing an
 existing production pipeline. The integration tests check first-frame and timestamp selection using generated red/blue MP4, MOV and WebM.
 
 ## Development
 
-Python 3.13 and uv:
+Python 3.13, uv, and FFmpeg/FFprobe with libvpx-vp9 and HEVC decoding (installed in the Docker image):
 
 ```sh
 uv sync --locked

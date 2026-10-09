@@ -16,6 +16,7 @@ from playwright.sync_api import sync_playwright
 from framelet.browser import Preview, capture
 from framelet.config import Settings
 from framelet.errors import PreviewError, busy_error
+from framelet.media import prepare_video
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,13 @@ def run_worker(connection: Connection, settings: Settings) -> None:
                         context.close()
                         connection.send(Reply())
                     else:
-                        connection.send(Reply(preview=capture(browser, command.path, settings, command.timestamp_ms)))
+                        prepared = prepare_video(command.path, settings, command.timestamp_ms)
+                        try:
+                            preview = capture(browser, prepared, settings, command.timestamp_ms)
+                        finally:
+                            if prepared != command.path:
+                                prepared.unlink(missing_ok=True)
+                        connection.send(Reply(preview=preview))
                 except PreviewError as exc:
                     connection.send(Reply(error_status=exc.status, error_code=exc.code, error_message=exc.message))
                 except BrowserTimeout:

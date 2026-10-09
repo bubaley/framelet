@@ -98,3 +98,32 @@ def test_timestamp_and_container_support(extension: str, tmp_path: Path) -> None
             assert response.json()['error']['code'] == 'timestamp_out_of_range'
             assert not list(tmp_path.iterdir())
         assert client.get('/health/ready').status_code == 200
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize('extension', ['hevc', 'hevc-10bit'])
+def test_hevc_first_frame_timestamp_and_cleanup(extension: str, tmp_path: Path) -> None:
+    settings = Settings(api_token=SecretStr(TOKEN), temp_directory=str(tmp_path))
+    source = VIDEO.with_name(f'red-blue-{extension}.mp4')
+    with TestClient(create_app(settings)) as client:
+        for timestamp, color in [(None, (253, 0, 0)), (1, (253, 0, 0)), (750, (0, 0, 254)), (999, (0, 0, 254))]:
+            response = client.post(
+                '/v1/preview',
+                headers={'Authorization': f'Bearer {TOKEN}'},
+                files={'video': ('upload.mp4', source.read_bytes())},
+                data={} if timestamp is None else {'timestamp_ms': str(timestamp)},
+            )
+            assert response.status_code == 200, response.text
+            image = Image.open(BytesIO(response.content)).convert('RGB')
+            assert image.size == (128, 96)
+            assert image.getpixel((64, 48)) == pytest.approx(color, abs=6)
+            assert not list(tmp_path.iterdir())
+        response = client.post(
+            '/v1/preview',
+            headers={'Authorization': f'Bearer {TOKEN}'},
+            files={'video': ('upload.mp4', source.read_bytes())},
+            data={'timestamp_ms': '1000'},
+        )
+        assert response.status_code == 422
+        assert response.json()['error']['code'] == 'timestamp_out_of_range'
+        assert not list(tmp_path.iterdir())
